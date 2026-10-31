@@ -266,7 +266,7 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const LOG: &[u8] = crate::test_support::LOG;
+    const LOG: &[u8] = crate::test_date::LOG;
     #[test]
     fn arbitrary_chunks_match() {
         let mut d = Decoder::default();
