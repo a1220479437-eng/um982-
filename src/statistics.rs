@@ -592,7 +592,7 @@ mod tests {
     }
     #[test]
     fn fixture_statistics_match_measurement_validity() {
-        let (records, _) = crate::protocol::decode_log(crate::test_support::LOG);
+        let (records, _) = crate::protocol::decode_log(crate::test_date::LOG);
         let times = crate::model::timeline(&records);
         let s = Statistics::from_records(&records, &times);
         let mut expected = [(0, 0); 3];
