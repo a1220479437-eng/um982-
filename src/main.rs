@@ -7,6 +7,8 @@ mod protocol;
 mod recording;
 mod serial;
 mod statistics;
+#[cfg(test)]
+mod test_support;
 
 use eframe::egui::{self, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2};
 use model::Model;

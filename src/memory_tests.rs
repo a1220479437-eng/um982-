@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn live_archive_stops_at_byte_budget_and_retains_existing_prefix() {
-    let (records, _) = protocol::decode_log(include_bytes!("../tests/fixtures/um982.dat"));
+    let (records, _) = protocol::decode_log(crate::test_support::LOG);
     let mut record = records[0].clone();
     record.raw = "x".repeat(4096);
     let mut archive = Vec::new();
@@ -22,7 +22,7 @@ fn live_archive_stops_at_byte_budget_and_retains_existing_prefix() {
 
 #[test]
 fn display_history_remains_bounded_during_long_streams() {
-    let (records, _) = protocol::decode_log(include_bytes!("../tests/fixtures/um982.dat"));
+    let (records, _) = protocol::decode_log(crate::test_support::LOG);
     let mut model = Model::default();
     for i in 0..50_000 {
         for record in &records {
