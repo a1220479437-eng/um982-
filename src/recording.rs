@@ -43,15 +43,11 @@ impl Recording {
         let worker = thread::Builder::new()
             .name("serial-recording".into())
             .spawn(move || {
-                let mut writer = BufWriter::new(file);
+                let mut writer = BufWriter::with_capacity(64 * 1024, file);
                 loop {
                     match receiver.recv_timeout(Duration::from_secs(1)) {
-                        Ok(bytes) => {
-                            writer.write_all(&bytes)?;
-                            // Make each received block available to other readers promptly.
-                            writer.flush()?;
-                        }
-                        Err(RecvTimeoutError::Timeout) => (),
+                        Ok(bytes) => writer.write_all(&bytes)?,
+                        Err(RecvTimeoutError::Timeout) => writer.flush()?,
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }

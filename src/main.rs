@@ -13,6 +13,7 @@ use model::Model;
 use protocol::{Decoder, Record};
 use std::{
     path::PathBuf,
+    sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
 };
 
@@ -90,6 +91,7 @@ struct App {
     speed: f64,
     last_tick: Instant,
     connection: Option<serial::Connection>,
+    load_rx: Option<Receiver<(PathBuf, Result<LoadedReplay, String>)>>,
     live_start: Instant,
     ports: Vec<String>,
     port: String,
@@ -104,6 +106,13 @@ struct App {
     follow: bool,
     live_limit_warned: bool,
     archive_bytes: usize,
+}
+
+struct LoadedReplay {
+    records: Vec<Record>,
+    stats: protocol::Stats,
+    times: Vec<f64>,
+    statistics: statistics::Statistics,
 }
 
 impl App {
@@ -152,6 +161,7 @@ impl App {
             speed: 1.0,
             last_tick: Instant::now(),
             connection: None,
+            load_rx: None,
             live_start: Instant::now(),
             ports: vec![],
             port: "COM13".into(),
@@ -203,21 +213,53 @@ impl App {
         self.live_limit_warned = false;
     }
     fn load(&mut self, path: PathBuf) {
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                let (records, stats) = protocol::decode_log(&bytes);
-                let mut decoder = Decoder::default();
-                decoder.stats = stats;
-                if records.is_empty() {
-                    self.notice = "没有可解析的 UM982 帧，当前数据保持不变".into();
-                    return;
-                }
+        if self.load_rx.is_some() {
+            self.notice = "正在读取日志，请稍候".into();
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let worker_path = path.clone();
+        match std::thread::Builder::new()
+            .name("replay-loader".into())
+            .spawn(move || {
+                let result = std::fs::read(&worker_path)
+                    .map_err(|e| e.to_string())
+                    .map(|bytes| {
+                        let (records, stats) = protocol::decode_log(&bytes);
+                        let times = model::timeline(&records);
+                        let statistics = statistics::Statistics::from_records(&records, &times);
+                        LoadedReplay {
+                            records,
+                            stats,
+                            times,
+                            statistics,
+                        }
+                    });
+                let _ = tx.send((worker_path, result));
+            }) {
+            Ok(_) => {
+                self.load_rx = Some(rx);
+                self.notice = format!("正在读取并解析 {}", path.display());
+            }
+            Err(e) => self.notice = format!("无法启动日志读取线程：{e}"),
+        }
+    }
+
+    fn finish_load(&mut self) {
+        let Some(rx) = self.load_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok((_path, Ok(loaded))) if loaded.records.is_empty() => {
+                self.notice = "没有可解析的 UM982 帧，当前数据保持不变".into();
+            }
+            Ok((path, Ok(loaded))) => {
                 self.connection = None;
                 self.reset();
-                self.decoder = decoder;
-                self.records = records;
-                self.times = model::timeline(&self.records);
-                self.statistics = statistics::Statistics::from_records(&self.records, &self.times);
+                self.decoder.stats = loaded.stats;
+                self.records = loaded.records;
+                self.times = loaded.times;
+                self.statistics = loaded.statistics;
                 self.selected = Some(path.clone());
                 self.source = path
                     .file_name()
@@ -230,7 +272,9 @@ impl App {
                     self.records.len()
                 );
             }
-            Err(e) => self.notice = format!("读取 {} 失败：{e}", path.display()),
+            Ok((path, Err(e))) => self.notice = format!("读取 {} 失败：{e}", path.display()),
+            Err(TryRecvError::Empty) => self.load_rx = Some(rx),
+            Err(TryRecvError::Disconnected) => self.notice = "日志读取线程异常退出".into(),
         }
     }
     fn seek(&mut self, t: f64) {
@@ -800,13 +844,12 @@ impl App {
                         .size(11.0)
                         .color(MUTED),
                     );
-                    let pitches: Vec<_> = self
+                    let pitches = self
                         .model
                         .pitches
                         .iter()
-                        .filter_map(|p| self.model.chart_time(p[0]).map(|x| [x, p[1], p[2]]))
-                        .collect();
-                    pitch_chart(ui, &pitches, 180.0, self.model.chart_now(self.clock));
+                        .filter_map(|p| self.model.chart_time(p[0]).map(|x| [x, p[1], p[2]]));
+                    pitch_chart(ui, pitches, 180.0, self.model.chart_now(self.clock));
                 });
             });
         });
@@ -886,6 +929,7 @@ fn format_duration(seconds: f64) -> String {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.finish_load();
         self.tick();
         ctx.request_repaint_after(Duration::from_millis(33));
         let dropped = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));
@@ -929,15 +973,14 @@ impl eframe::App for App {
                 0 => self.dashboard(ui),
                 1 => {
                     ui.label("高程（m） / 北斗时间（UTC），有效绿色 / 无效红色，最近 60 秒");
-                    let heights: Vec<_> = self
+                    let heights = self
                         .model
                         .heights
                         .iter()
-                        .filter_map(|p| self.model.chart_time(p[0]).map(|x| [x, p[1], p[2]]))
-                        .collect();
+                        .filter_map(|p| self.model.chart_time(p[0]).map(|x| [x, p[1], p[2]]));
                     chart(
                         ui,
-                        &heights,
+                        heights,
                         180.0,
                         false,
                         self.model.chart_now(self.clock),
@@ -945,43 +988,40 @@ impl eframe::App for App {
                     ui.label(
                         "航向角（°，0/360°跨越处保留原始跳变） / 北斗时间（UTC），有效绿色 / 无效红色，最近 60 秒",
                     );
-                    let angles: Vec<_> = self
+                    let angles = self
                         .model
                         .angles
                         .iter()
-                        .filter_map(|p| self.model.chart_time(p[0]).map(|x| [x, p[1], p[2]]))
-                        .collect();
+                        .filter_map(|p| self.model.chart_time(p[0]).map(|x| [x, p[1], p[2]]));
                     chart(
                         ui,
-                        &angles,
+                        angles,
                         180.0,
                         false,
                         self.model.chart_now(self.clock),
                     );
                     ui.label("地速（m/s） / 北斗时间（UTC），有效绿色 / 无效红色，最近 60 秒");
-                    let speeds: Vec<_> = self
+                    let speeds = self
                         .model
                         .speeds
                         .iter()
-                        .filter_map(|p| self.model.chart_time(p[0]).map(|x| [x, p[1], p[2]]))
-                        .collect();
+                        .filter_map(|p| self.model.chart_time(p[0]).map(|x| [x, p[1], p[2]]));
                     chart(
                         ui,
-                        &speeds,
+                        speeds,
                         150.0,
                         false,
                         self.model.chart_now(self.clock),
                     );
                     ui.label("参与定位卫星数 / 北斗时间（UTC），有效绿色 / 无效红色");
-                    let satellites: Vec<_> = self
+                    let satellites = self
                         .model
                         .satellites
                         .iter()
-                        .filter_map(|p| self.model.chart_time(p[0]).map(|x| [x, p[1], p[2]]))
-                        .collect();
+                        .filter_map(|p| self.model.chart_time(p[0]).map(|x| [x, p[1], p[2]]));
                     chart(
                         ui,
-                        &satellites,
+                        satellites,
                         150.0,
                         false,
                         self.model.chart_now(self.clock),
@@ -1131,7 +1171,12 @@ fn pitch_ruler(ui: &mut egui::Ui, pitch: Option<f64>, valid: bool) {
         painter.circle_filled(Pos2::new(x, y - 12.0), 5.0, color);
     }
 }
-fn pitch_chart(ui: &mut egui::Ui, points: &[[f64; 3]], height: f32, now: Option<f64>) {
+fn pitch_chart(
+    ui: &mut egui::Ui,
+    points: impl Iterator<Item = [f64; 3]> + Clone,
+    height: f32,
+    now: Option<f64>,
+) {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     let painter = ui.painter();
@@ -1147,13 +1192,8 @@ fn pitch_chart(ui: &mut egui::Ui, points: &[[f64; 3]], height: f32, now: Option<
         );
         return;
     };
-    let axis_now = points.last().map_or(now, |point| now.max(point[0]));
-    let (x_min, x_max) = chart_window_range(axis_now, points);
-    let visible_points: Vec<_> = points
-        .iter()
-        .filter(|point| point[0] >= x_min && point[0] <= x_max)
-        .copied()
-        .collect();
+    let axis_now = points.clone().last().map_or(now, |point| now.max(point[0]));
+    let (x_min, x_max) = chart_window_range_iter(axis_now, points.clone());
     let project = |point: [f64; 2]| {
         Pos2::new(
             area.left() + ((point[0] - x_min) / (x_max - x_min)) as f32 * area.width(),
@@ -1190,25 +1230,31 @@ fn pitch_chart(ui: &mut egui::Ui, points: &[[f64; 3]], height: f32, now: Option<
         );
     }
 
-    for pair in visible_points.windows(2) {
-        let color = if pair[1][2] > 0.5 {
+    let visible = |point: &[f64; 3]| point[0] >= x_min && point[0] <= x_max;
+    let mut visible_points = points.clone().filter(visible);
+    if let Some(mut previous) = visible_points.next() {
+        let color = if previous[2] > 0.5 {
             GREEN
         } else {
             Color32::RED
         };
-        painter.line_segment(
-            [
-                project([pair[0][0], pair[0][1]]),
-                project([pair[1][0], pair[1][1]]),
-            ],
-            Stroke::new(1.5, color),
-        );
-    }
-    for point in &visible_points {
-        let color = if point[2] > 0.5 { GREEN } else { Color32::RED };
-        painter.circle_filled(project([point[0], point[1]]), 2.5, color);
-    }
-    if visible_points.is_empty() {
+        painter.circle_filled(project([previous[0], previous[1]]), 2.5, color);
+        for point in visible_points {
+            painter.line_segment(
+                [
+                    project([previous[0], previous[1]]),
+                    project([point[0], point[1]]),
+                ],
+                Stroke::new(1.5, if point[2] > 0.5 { GREEN } else { Color32::RED }),
+            );
+            painter.circle_filled(
+                project([point[0], point[1]]),
+                2.5,
+                if point[2] > 0.5 { GREEN } else { Color32::RED },
+            );
+            previous = point;
+        }
+    } else {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -1231,7 +1277,13 @@ fn pitch_chart(ui: &mut egui::Ui, points: &[[f64; 3]], height: f32, now: Option<
         }
     }
 }
-fn chart(ui: &mut egui::Ui, points: &[[f64; 3]], height: f32, equal: bool, now: Option<f64>) {
+fn chart(
+    ui: &mut egui::Ui,
+    points: impl Iterator<Item = [f64; 3]> + Clone,
+    height: f32,
+    equal: bool,
+    now: Option<f64>,
+) {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     let p = ui.painter();
@@ -1247,21 +1299,19 @@ fn chart(ui: &mut egui::Ui, points: &[[f64; 3]], height: f32, equal: bool, now: 
         );
         return;
     };
-    let axis_now = points.last().map_or(now, |point| now.max(point[0]));
-    let (x_min, x_max) = chart_window_range(axis_now, points);
-    let visible_points: Vec<_> = points
-        .iter()
-        .filter(|point| point[0] >= x_min && point[0] <= x_max)
-        .copied()
-        .collect();
+    let axis_now = points.clone().last().map_or(now, |point| now.max(point[0]));
+    let (x_min, x_max) = chart_window_range_iter(axis_now, points.clone());
     let x_span = (x_max - x_min).max(0.001);
     let mut min = [0.0, f64::INFINITY];
     let mut max = [x_span, f64::NEG_INFINITY];
-    for v in &visible_points {
-        min[1] = min[1].min(v[1]);
-        max[1] = max[1].max(v[1]);
+    let visible = |point: &[f64; 3]| point[0] >= x_min && point[0] <= x_max;
+    let mut has_visible_points = false;
+    for point in points.clone().filter(visible) {
+        has_visible_points = true;
+        min[1] = min[1].min(point[1]);
+        max[1] = max[1].max(point[1]);
     }
-    if visible_points.is_empty() {
+    if !has_visible_points {
         min[1] = -1.0;
         max[1] = 1.0;
     }
@@ -1312,28 +1362,33 @@ fn chart(ui: &mut egui::Ui, points: &[[f64; 3]], height: f32, equal: bool, now: 
             MUTED,
         );
     }
-    for pair in visible_points.windows(2) {
-        let color = if pair[1][2] > 0.5 {
-            GREEN
-        } else {
-            Color32::RED
-        };
-        p.line_segment(
-            [
-                project([pair[0][0], pair[0][1]]),
-                project([pair[1][0], pair[1][1]]),
-            ],
-            Stroke::new(1.5, color),
-        );
-    }
-    for point in &visible_points {
+    let mut visible_points = points.clone().filter(visible);
+    if let Some(mut previous) = visible_points.next() {
         p.circle_filled(
-            project([point[0], point[1]]),
+            project([previous[0], previous[1]]),
             3.5,
-            if point[2] > 0.5 { GREEN } else { Color32::RED },
+            if previous[2] > 0.5 {
+                GREEN
+            } else {
+                Color32::RED
+            },
         );
-    }
-    if visible_points.is_empty() {
+        for point in visible_points {
+            p.line_segment(
+                [
+                    project([previous[0], previous[1]]),
+                    project([point[0], point[1]]),
+                ],
+                Stroke::new(1.5, if point[2] > 0.5 { GREEN } else { Color32::RED }),
+            );
+            p.circle_filled(
+                project([point[0], point[1]]),
+                3.5,
+                if point[2] > 0.5 { GREEN } else { Color32::RED },
+            );
+            previous = point;
+        }
+    } else {
         p.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -1343,7 +1398,7 @@ fn chart(ui: &mut egui::Ui, points: &[[f64; 3]], height: f32, equal: bool, now: 
         );
     }
     if let Some(mouse) = response.hover_pos() {
-        if let Some(v) = visible_points.iter().min_by(|a, b| {
+        if let Some(v) = points.filter(visible).min_by(|a, b| {
             project([a[0], a[1]])
                 .distance_sq(mouse)
                 .total_cmp(&project([b[0], b[1]]).distance_sq(mouse))
@@ -1366,11 +1421,16 @@ fn format_gnss_axis(timestamp: f64) -> String {
         .map(|time| time.format("%H:%M:%S").to_string())
         .unwrap_or_else(|| "--:--:--".into())
 }
+#[cfg(test)]
 fn chart_window_range(now: f64, points: &[[f64; 3]]) -> (f64, f64) {
-    let x_max = points.last().map_or(now, |point| now.max(point[0]));
+    chart_window_range_iter(now, points.iter().copied())
+}
+
+fn chart_window_range_iter(now: f64, points: impl Iterator<Item = [f64; 3]> + Clone) -> (f64, f64) {
+    let x_max = points.clone().last().map_or(now, |point| now.max(point[0]));
     let window_start = x_max - CHART_WINDOW_SECONDS;
     let x_min = points
-        .iter()
+        .clone()
         .find(|point| point[0] >= window_start)
         .map_or(window_start, |point| point[0]);
     if x_max - x_min < 0.001 {
