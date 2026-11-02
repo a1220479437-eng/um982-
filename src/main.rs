@@ -1223,7 +1223,7 @@ fn pitch_chart(
         painter.text(
             Pos2::new(area.left() - 4.0, y),
             egui::Align2::RIGHT_CENTER,
-            format!("{:.0}", 90.0 - 180.0 * fraction as f64),
+            format!("{:.0}", -90.0 + 180.0 * fraction as f64),
             FontId::monospace(10.0),
             MUTED,
         );
