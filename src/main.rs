@@ -452,7 +452,12 @@ impl App {
                     "自动重置",
                 )
             });
-            let color = if self.automatic_reset { CYAN } else { MUTED };
+            let colors = Palette::for_ui(ui);
+            let color = if self.automatic_reset {
+                colors.accent
+            } else {
+                colors.muted
+            };
             ui.painter().rect_filled(rect, 10.0, color);
             let x = if self.automatic_reset {
                 rect.right() - 10.0
@@ -460,7 +465,7 @@ impl App {
                 rect.left() + 10.0
             };
             ui.painter()
-                .circle_filled(Pos2::new(x, rect.center().y), 7.0, Color32::WHITE);
+                .circle_filled(Pos2::new(x, rect.center().y), 7.0, colors.chart);
             ui.label(if self.automatic_reset {
                 "自动"
             } else {
@@ -471,7 +476,7 @@ impl App {
             ui.label(
                 RichText::new("断流 ≥ 2 秒后，下一完整帧触发重置及文件滚动")
                     .size(11.0)
-                    .color(MUTED),
+                    .color(Palette::for_ui(ui).muted),
             );
         } else if ui
             .add_enabled(
