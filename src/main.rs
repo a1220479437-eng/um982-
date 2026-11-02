@@ -835,7 +835,10 @@ impl App {
                     ui.strong("当前俯仰角");
                     pitch_ruler(ui, heading.map(|(h, _)| h.pitch), hv);
                     ui.add_space(8.0);
-                    ui.strong("俯仰角变化");
+                    ui.strong(format!(
+                        "俯仰角变化（{}°）",
+                        chart_value(heading.map(|(h, _)| h.pitch), 2),
+                    ));
                     ui.label(
                         RichText::new(
                             "有效俯仰（绿）/ 无效俯仰（红）· 北斗时间（UTC），最近 60 秒",
@@ -917,6 +920,35 @@ impl App {
         });
     }
 }
+// Display the latest receiver solution, not a smoothed or last-valid value.
+fn chart_value(value: Option<f64>, precision: usize) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map(|value| format!("{value:.precision$}"))
+        .unwrap_or_else(|| "--".into())
+}
+
+#[cfg(test)]
+mod chart_value_tests {
+    use super::chart_value;
+
+    #[test]
+    fn formats_solution_values_with_metric_precision() {
+        assert_eq!(chart_value(Some(36.2), 2), "36.20");
+        assert_eq!(chart_value(Some(-12.34567), 4), "-12.3457");
+        assert_eq!(chart_value(Some(1.23456), 3), "1.235");
+        assert_eq!(chart_value(Some(18.0), 0), "18");
+        assert_eq!(chart_value(Some(0.0), 2), "0.00");
+    }
+
+    #[test]
+    fn missing_or_non_finite_values_show_placeholder() {
+        for value in [None, Some(f64::NAN), Some(f64::INFINITY), Some(f64::NEG_INFINITY)] {
+            assert_eq!(chart_value(value, 2), "--");
+        }
+    }
+}
+
 fn format_duration(seconds: f64) -> String {
     if seconds < 60.0 {
         format!("{seconds:.2} s")
@@ -971,7 +1003,10 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
                 0 => self.dashboard(ui),
                 1 => {
-                    ui.label("高程（m） / 北斗时间（UTC），有效绿色 / 无效红色，最近 60 秒");
+                    ui.label(format!(
+                        "高程（{} m） / 北斗时间（UTC），有效绿色 / 无效红色，最近 60 秒",
+                        chart_value(self.model.position.as_ref().map(|(p, _)| p.height), 4),
+                    ));
                     let heights = self
                         .model
                         .heights
@@ -984,9 +1019,10 @@ impl eframe::App for App {
                         false,
                         self.model.chart_now(self.clock),
                     );
-                    ui.label(
-                        "航向角（°，0/360°跨越处保留原始跳变） / 北斗时间（UTC），有效绿色 / 无效红色，最近 60 秒",
-                    );
+                    ui.label(format!(
+                        "航向角（{}°，0/360°跨越处保留原始跳变） / 北斗时间（UTC），有效绿色 / 无效红色，最近 60 秒",
+                        chart_value(self.model.heading.as_ref().map(|(h, _)| h.angle), 2),
+                    ));
                     let angles = self
                         .model
                         .angles
@@ -999,7 +1035,10 @@ impl eframe::App for App {
                         false,
                         self.model.chart_now(self.clock),
                     );
-                    ui.label("地速（m/s） / 北斗时间（UTC），有效绿色 / 无效红色，最近 60 秒");
+                    ui.label(format!(
+                        "地速（{} m/s） / 北斗时间（UTC），有效绿色 / 无效红色，最近 60 秒",
+                        chart_value(self.model.position.as_ref().map(|(p, _)| p.speed), 3),
+                    ));
                     let speeds = self
                         .model
                         .speeds
@@ -1012,7 +1051,13 @@ impl eframe::App for App {
                         false,
                         self.model.chart_now(self.clock),
                     );
-                    ui.label("参与定位卫星数 / 北斗时间（UTC），有效绿色 / 无效红色");
+                    ui.label(format!(
+                        "参与定位卫星数（{}） / 北斗时间（UTC），有效绿色 / 无效红色",
+                        chart_value(
+                            self.model.position.as_ref().map(|(p, _)| f64::from(p.used)),
+                            0,
+                        ),
+                    ));
                     let satellites = self
                         .model
                         .satellites
