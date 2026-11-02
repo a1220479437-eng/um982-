@@ -108,6 +108,7 @@ struct App {
     follow: bool,
     live_limit_warned: bool,
     archive_bytes: usize,
+    automatic_reset: bool,
 }
 
 struct LoadedReplay {
@@ -178,6 +179,7 @@ impl App {
             follow: true,
             live_limit_warned: false,
             archive_bytes: 0,
+            automatic_reset: true,
         };
         app.refresh_ports();
         // File input is opt-in; normal startup waits for a serial connection.
@@ -317,6 +319,17 @@ impl App {
                             }
                         }
                     }
+                    Some(serial::Event::Reset(path)) => {
+                        self.reset();
+                        self.statistics = statistics::Statistics::live();
+                        self.live_start = Instant::now();
+                        self.selected = None;
+                        if let Some(connection) = self.connection.as_mut() {
+                            connection.log_path = path.clone();
+                        }
+                        self.files = replay_files(std::path::Path::new(REPLAY_DIR));
+                        self.notice = format!("数据已重置；录制至 {}", path.display());
+                    }
                     Some(serial::Event::Error(e)) => {
                         error = Some(e);
                         break;
@@ -395,7 +408,7 @@ impl App {
             .add_enabled(!self.port.is_empty(), egui::Button::new("连接串口"))
             .clicked()
         {
-            match serial::connect(&self.port, self.baud) {
+            match serial::connect(&self.port, self.baud, self.automatic_reset) {
                 Ok(c) => {
                     self.reset();
                     self.statistics = statistics::Statistics::live();
@@ -407,6 +420,62 @@ impl App {
                 }
                 Err(e) => self.notice = format!("连接失败：{e}"),
             }
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label("重置模式");
+            let (rect, response) = ui.allocate_exact_size(Vec2::new(36.0, 20.0), Sense::click());
+            if response.clicked() {
+                self.automatic_reset = !self.automatic_reset;
+                if let Some(c) = &self.connection
+                    && c.commands
+                        .send(serial::Command::SetAutomatic(self.automatic_reset))
+                        .is_err()
+                {
+                    self.notice = "切换模式失败：串口线程已停止".into();
+                }
+            }
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Checkbox,
+                    true,
+                    self.automatic_reset,
+                    "自动重置",
+                )
+            });
+            let color = if self.automatic_reset { CYAN } else { MUTED };
+            ui.painter().rect_filled(rect, 10.0, color);
+            let x = if self.automatic_reset {
+                rect.right() - 10.0
+            } else {
+                rect.left() + 10.0
+            };
+            ui.painter()
+                .circle_filled(Pos2::new(x, rect.center().y), 7.0, Color32::WHITE);
+            ui.label(if self.automatic_reset {
+                "自动"
+            } else {
+                "手动"
+            });
+        });
+        if self.automatic_reset {
+            ui.label(
+                RichText::new("断流 ≥ 2 秒后，下一完整帧触发重置及文件滚动")
+                    .size(11.0)
+                    .color(MUTED),
+            );
+        } else if ui
+            .add_enabled(
+                self.connection.is_some(),
+                egui::Button::new("重置数据并滚动文件"),
+            )
+            .clicked()
+            && let Some(c) = &self.connection
+        {
+            self.notice = match c.commands.send(serial::Command::Reset) {
+                Ok(()) => "正在重置数据并滚动文件…".into(),
+                Err(e) => format!("重置失败：{e}"),
+            };
         }
         ui.add_space(10.0);
         ui.label("手动指令（自动添加 CRLF）");
