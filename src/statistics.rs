@@ -173,10 +173,10 @@ impl Statistics {
         self.end = self.end.max(t);
         let time = self.time_at(self.end);
         for channel in 0..3 {
-            if let Some(last) = self.channels[channel].last {
-                if t - last > 2.0 {
-                    self.transition(channel, last + 2.0, Some("超过 2 秒未更新".into()));
-                }
+            if let Some(last) = self.channels[channel].last
+                && t - last > 2.0
+            {
+                self.transition(channel, last + 2.0, Some("超过 2 秒未更新".into()));
             }
             if let Some(i) = self.channels[channel].active {
                 self.intervals[i].end = self.end;

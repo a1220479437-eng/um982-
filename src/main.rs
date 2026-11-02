@@ -182,10 +182,10 @@ impl App {
         app.refresh_ports();
         // File input is opt-in; normal startup waits for a serial connection.
         let mut args = std::env::args_os().skip(1);
-        if args.next().is_some_and(|arg| arg == "--replay") {
-            if let Some(path) = args.next() {
-                app.load(PathBuf::from(path));
-            }
+        if args.next().is_some_and(|arg| arg == "--replay")
+            && let Some(path) = args.next()
+        {
+            app.load(PathBuf::from(path));
         }
         app
     }
@@ -435,16 +435,14 @@ impl App {
                 egui::Button::new("导出整个会话 CSV…"),
             )
             .clicked()
-        {
-            if let Some(path) = rfd::FileDialog::new()
+            && let Some(path) = rfd::FileDialog::new()
                 .set_file_name("um982.csv")
                 .save_file()
-            {
-                self.notice = match model::export(&path, &self.records) {
-                    Ok(()) => format!("已导出 {} 帧至 {}", self.records.len(), path.display()),
-                    Err(e) => format!("导出失败：{e}"),
-                };
-            }
+        {
+            self.notice = match model::export(&path, &self.records) {
+                Ok(()) => format!("已导出 {} 帧至 {}", self.records.len(), path.display()),
+                Err(e) => format!("导出失败：{e}"),
+            };
         }
         ui.add_space(10.0);
         ui.add_enabled_ui(self.connection.is_none(), |ui| {
@@ -457,14 +455,13 @@ impl App {
                 if ui.button("刷新文件列表").clicked() {
                     self.files = replay_files(std::path::Path::new(REPLAY_DIR));
                 }
-                if ui.button("打开 DAT / LOG…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
+                if ui.button("打开 DAT / LOG…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
                         .set_directory(REPLAY_DIR)
                         .add_filter("串口日志", &["DAT", "dat", "log", "txt"])
                         .pick_file()
-                    {
-                        self.load(path);
-                    }
+                {
+                    self.load(path);
                 }
                 if self.files.is_empty() {
                     ui.label(format!("{REPLAY_DIR}/ 中暂无 DAT 文件"));
@@ -1144,7 +1141,7 @@ fn pitch_ruler(ui: &mut egui::Ui, pitch: Option<f64>, valid: bool) {
     let y = rect.top() + 82.0;
     painter.line_segment(
         [Pos2::new(left, y), Pos2::new(right, y)],
-        Stroke::new(1.5, MUTED),
+        Stroke::new(1.5_f32, MUTED),
     );
     for degree in (-90..=90).step_by(10) {
         let x = egui::remap(degree as f32, -90.0..=90.0, left..=right);
@@ -1152,7 +1149,7 @@ fn pitch_ruler(ui: &mut egui::Ui, pitch: Option<f64>, valid: bool) {
         let tick_end = y + if major { 17.0 } else { 9.0 };
         painter.line_segment(
             [Pos2::new(x, y), Pos2::new(x, tick_end)],
-            Stroke::new(1.0, MUTED),
+            Stroke::new(1.0_f32, MUTED),
         );
         if major {
             painter.text(
@@ -1168,7 +1165,7 @@ fn pitch_ruler(ui: &mut egui::Ui, pitch: Option<f64>, valid: bool) {
         let x = egui::remap(pitch.clamp(-90.0, 90.0) as f32, -90.0..=90.0, left..=right);
         painter.line_segment(
             [Pos2::new(x, y - 10.0), Pos2::new(x, y + 22.0)],
-            Stroke::new(3.0, color),
+            Stroke::new(3.0_f32, color),
         );
         painter.circle_filled(Pos2::new(x, y - 12.0), 5.0, color);
     }
@@ -1207,7 +1204,7 @@ fn pitch_chart(
         let fraction = i as f32 / 4.0;
         let x = area.left() + area.width() * fraction;
         let y = area.bottom() - area.height() * fraction;
-        let grid = Stroke::new(1.0, Color32::from_rgb(35, 48, 65));
+        let grid = Stroke::new(1.0_f32, Color32::from_rgb(35, 48, 65));
         painter.line_segment(
             [Pos2::new(x, area.top()), Pos2::new(x, area.bottom())],
             grid,
@@ -1247,7 +1244,7 @@ fn pitch_chart(
                     project([previous[0], previous[1]]),
                     project([point[0], point[1]]),
                 ],
-                Stroke::new(1.5, if point[2] > 0.5 { GREEN } else { Color32::RED }),
+                Stroke::new(1.5_f32, if point[2] > 0.5 { GREEN } else { Color32::RED }),
             );
             painter.circle_filled(
                 project([point[0], point[1]]),
@@ -1265,18 +1262,18 @@ fn pitch_chart(
             MUTED,
         );
     }
-    if let Some(mouse) = response.hover_pos() {
-        if area.contains(mouse) {
-            let hovered_time =
-                x_min + ((mouse.x - area.left()) / area.width()) as f64 * (x_max - x_min);
-            painter.text(
-                mouse + Vec2::new(8.0, -8.0),
-                egui::Align2::LEFT_BOTTOM,
-                format_gnss_axis(hovered_time),
-                FontId::monospace(10.0),
-                Color32::WHITE,
-            );
-        }
+    if let Some(mouse) = response.hover_pos()
+        && area.contains(mouse)
+    {
+        let hovered_time =
+            x_min + ((mouse.x - area.left()) / area.width()) as f64 * (x_max - x_min);
+        painter.text(
+            mouse + Vec2::new(8.0, -8.0),
+            egui::Align2::LEFT_BOTTOM,
+            format_gnss_axis(hovered_time),
+            FontId::monospace(10.0),
+            Color32::WHITE,
+        );
     }
 }
 fn chart(
@@ -1381,7 +1378,7 @@ fn chart(
                     project([previous[0], previous[1]]),
                     project([point[0], point[1]]),
                 ],
-                Stroke::new(1.5, if point[2] > 0.5 { GREEN } else { Color32::RED }),
+                Stroke::new(1.5_f32, if point[2] > 0.5 { GREEN } else { Color32::RED }),
             );
             p.circle_filled(
                 project([point[0], point[1]]),
@@ -1399,23 +1396,23 @@ fn chart(
             MUTED,
         );
     }
-    if let Some(mouse) = response.hover_pos() {
-        if let Some(v) = points.filter(visible).min_by(|a, b| {
+    if let Some(mouse) = response.hover_pos()
+        && let Some(v) = points.filter(visible).min_by(|a, b| {
             project([a[0], a[1]])
                 .distance_sq(mouse)
                 .total_cmp(&project([b[0], b[1]]).distance_sq(mouse))
-        }) {
-            p.circle_stroke(
-                project([v[0], v[1]]),
-                5.0,
-                Stroke::new(1.0_f32, Color32::WHITE),
-            );
-            response.on_hover_text(format!(
-                "时间: {}\n数值: {:.4}",
-                format_gnss_axis(v[0]),
-                v[1]
-            ));
-        }
+        })
+    {
+        p.circle_stroke(
+            project([v[0], v[1]]),
+            5.0,
+            Stroke::new(1.0_f32, Color32::WHITE),
+        );
+        response.on_hover_text(format!(
+            "时间: {}\n数值: {:.4}",
+            format_gnss_axis(v[0]),
+            v[1]
+        ));
     }
 }
 fn format_gnss_axis(timestamp: f64) -> String {
