@@ -1034,7 +1034,12 @@ mod chart_value_tests {
 
     #[test]
     fn missing_or_non_finite_values_show_placeholder() {
-        for value in [None, Some(f64::NAN), Some(f64::INFINITY), Some(f64::NEG_INFINITY)] {
+        for value in [
+            None,
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+        ] {
             assert_eq!(chart_value(value, 2), "--");
         }
     }
@@ -1108,6 +1113,7 @@ impl eframe::App for App {
                         heights,
                         180.0,
                         false,
+                        false,
                         self.model.chart_now(self.clock),
                     );
                     ui.label(format!(
@@ -1124,6 +1130,7 @@ impl eframe::App for App {
                         angles,
                         180.0,
                         false,
+                        false,
                         self.model.chart_now(self.clock),
                     );
                     ui.label(format!(
@@ -1139,6 +1146,7 @@ impl eframe::App for App {
                         ui,
                         speeds,
                         150.0,
+                        false,
                         false,
                         self.model.chart_now(self.clock),
                     );
@@ -1159,6 +1167,7 @@ impl eframe::App for App {
                         satellites,
                         150.0,
                         false,
+                        true,
                         self.model.chart_now(self.clock),
                     );
                 }
@@ -1439,6 +1448,7 @@ fn chart(
     points: impl Iterator<Item = [f64; 3]> + Clone,
     height: f32,
     equal: bool,
+    integer_y: bool,
     now: Option<f64>,
 ) {
     let (rect, response) =
@@ -1476,6 +1486,9 @@ fn chart(
     let pad = ((max[1] - min[1]) * 0.08).max(if equal { 0.1 } else { 0.01 });
     min[1] -= pad;
     max[1] += pad;
+    if integer_y {
+        (min[1], max[1]) = satellite_axis_range(min[1], max[1]);
+    }
     if equal {
         let scale =
             ((max[0] - min[0]) / area.width() as f64).max((max[1] - min[1]) / area.height() as f64);
@@ -1515,7 +1528,16 @@ fn chart(
         p.text(
             Pos2::new(area.left() - 4.0, y),
             egui::Align2::RIGHT_CENTER,
-            format!("{:.2}", min[1] + (max[1] - min[1]) * f as f64),
+            if integer_y {
+                let value = min[1] + (max[1] - min[1]) * f as f64;
+                if value > 0.0 {
+                    format!("{value:.0}")
+                } else {
+                    String::new()
+                }
+            } else {
+                format!("{:.2}", min[1] + (max[1] - min[1]) * f as f64)
+            },
             FontId::monospace(12.0),
             colors.text,
         );
@@ -1585,6 +1607,32 @@ fn chart(
         ));
     }
 }
+fn satellite_axis_range(min: f64, max: f64) -> (f64, f64) {
+    let min = min.floor().max(0.0);
+    let step = ((max - min) / 4.0).ceil().max(1.0);
+    (min, min + step * 4.0)
+}
+
+#[cfg(test)]
+mod satellite_axis_tests {
+    use super::satellite_axis_range;
+
+    #[test]
+    fn ticks_are_positive_integers_with_zero_data_supported() {
+        for (min, max) in [(-1.0, 1.0), (-0.01, 0.01), (17.99, 18.01), (2.0, 60.0)] {
+            let (lower, upper) = satellite_axis_range(min, max);
+            assert!(lower >= 0.0);
+            assert!(lower <= min.max(0.0));
+            assert!(upper >= max);
+            let step = (upper - lower) / 4.0;
+            assert!(step >= 1.0);
+            for i in 0..=4 {
+                assert_eq!((lower + step * i as f64).fract(), 0.0);
+            }
+        }
+    }
+}
+
 fn format_gnss_axis(timestamp: f64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis((timestamp * 1000.0).round() as i64)
         .map(|time| time.format("%H:%M:%S").to_string())
