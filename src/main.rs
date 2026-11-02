@@ -9,8 +9,9 @@ mod serial;
 mod statistics;
 #[cfg(test)]
 mod test_date;
+mod theme;
 
-use eframe::egui::{self, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, FontId, Pos2, RichText, Sense, Stroke, Vec2};
 use model::Model;
 use protocol::{Decoder, Record};
 use std::{
@@ -18,6 +19,7 @@ use std::{
     sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
 };
+use theme::{Palette, Theme};
 
 const LIVE_ARCHIVE_BYTES: usize = 8 * 1024 * 1024;
 const LIVE_ARCHIVE_FRAMES: usize = 200_000;
@@ -32,9 +34,6 @@ fn archive_live(records: &mut Vec<Record>, bytes: &mut usize, record: Record) ->
     true
 }
 
-const CYAN: Color32 = Color32::from_rgb(66, 207, 219);
-const GREEN: Color32 = Color32::from_rgb(105, 218, 151);
-const MUTED: Color32 = Color32::from_rgb(143, 160, 182);
 const CHART_WINDOW_SECONDS: f64 = 60.0;
 
 #[cfg(debug_assertions)]
@@ -104,6 +103,7 @@ struct App {
     source: String,
     notice: String,
     tab: usize,
+    theme: Theme,
     filter: String,
     follow: bool,
     live_limit_warned: bool,
@@ -142,11 +142,7 @@ impl App {
             }
         }
         cc.egui_ctx.set_fonts(fonts);
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = Color32::from_rgb(17, 24, 36);
-        visuals.window_fill = Color32::from_rgb(22, 31, 46);
-        visuals.selection.bg_fill = Color32::from_rgb(27, 95, 114);
-        cc.egui_ctx.set_visuals(visuals);
+        Theme::default().apply(&cc.egui_ctx);
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.item_spacing = Vec2::new(10.0, 9.0);
         cc.egui_ctx.set_style(style);
@@ -174,6 +170,7 @@ impl App {
             source: "等待串口输入".into(),
             notice: "请选择串口并连接（8N1，无流控）".into(),
             tab: 0,
+            theme: Theme::default(),
             filter: String::new(),
             follow: true,
             live_limit_warned: false,
@@ -352,13 +349,25 @@ impl App {
     }
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
-        ui.heading(RichText::new("北斗 / BEIDOU").color(CYAN));
+        ui.heading(RichText::new("北斗 / BEIDOU").color(Palette::for_ui(ui).accent));
         ui.label(
             RichText::new("UM982  NAVIGATION CONSOLE")
                 .size(10.0)
-                .color(MUTED),
+                .color(Palette::for_ui(ui).muted),
         );
         ui.add_space(16.0);
+        let previous_theme = self.theme;
+        egui::ComboBox::from_label("显示主题")
+            .selected_text(self.theme.label())
+            .show_ui(ui, |ui| {
+                for theme in [Theme::Dark, Theme::Light] {
+                    ui.selectable_value(&mut self.theme, theme, theme.label());
+                }
+            });
+        if self.theme != previous_theme {
+            self.theme.apply(ui.ctx());
+            ui.ctx().request_repaint();
+        }
         ui.separator();
         ui.heading("串口采集");
         ui.label("串口端口");
@@ -451,7 +460,11 @@ impl App {
                 let hint = "本地日志仅用于验证解析与显示，实际采集使用串口。";
                 #[cfg(not(debug_assertions))]
                 let hint = "logs/ 录制文件（最新优先），选择后可播放。";
-                ui.label(RichText::new(hint).size(11.0).color(MUTED));
+                ui.label(
+                    RichText::new(hint)
+                        .size(12.0)
+                        .color(Palette::for_ui(ui).muted),
+                );
                 if ui.button("刷新文件列表").clicked() {
                     self.files = replay_files(std::path::Path::new(REPLAY_DIR));
                 }
@@ -481,19 +494,19 @@ impl App {
                 }
             });
         });
-        ui.label(RichText::new("协议：BESTNAVA / UNIHEADINGA / RECTIMEA\nCRC32 · 跨包拼帧 · 2 秒超时\n每类曲线保留最近 10000 个测量点\n无在线地图依赖").size(11.0).color(MUTED));
+        ui.label(RichText::new("协议：BESTNAVA / UNIHEADINGA / RECTIMEA\nCRC32 · 跨包拼帧 · 2 秒超时\n每类曲线保留最近 10000 个测量点\n无在线地图依赖").size(12.0).color(Palette::for_ui(ui).muted));
     }
     fn playback(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&self.source).strong());
             ui.label(if self.connection.is_some() {
-                RichText::new("● LIVE").color(GREEN)
+                RichText::new("● LIVE").color(Palette::for_ui(ui).valid)
             } else if self.selected.is_some() {
-                RichText::new(format!("● {REPLAY_TITLE}")).color(CYAN)
+                RichText::new(format!("● {REPLAY_TITLE}")).color(Palette::for_ui(ui).accent)
             } else if !self.records.is_empty() {
-                RichText::new("○ 串口已断开").color(MUTED)
+                RichText::new("○ 串口已断开").color(Palette::for_ui(ui).muted)
             } else {
-                RichText::new("○ 串口未连接").color(MUTED)
+                RichText::new("○ 串口未连接").color(Palette::for_ui(ui).muted)
             });
         });
         if self.connection.is_none() && !self.records.is_empty() {
@@ -668,7 +681,7 @@ impl App {
                 (invalid - valid).abs() * 1000.0
             ));
         }
-        ui.colored_label(MUTED, "成因提示：解类型退化、卫星数下降、俯仰变化与标准差超限可作为关联线索，但仅凭这些报文不能确认转动、遮挡或失锁，也不能仅凭基线均值排除硬件故障。");
+        ui.colored_label(Palette::for_ui(ui).muted, "成因提示：解类型退化、卫星数下降、俯仰变化与标准差超限可作为关联线索，但仅凭这些报文不能确认转动、遮挡或失锁，也不能仅凭基线均值排除硬件故障。");
     }
     fn statistics_page(&self, ui: &mut egui::Ui) {
         ui.heading("失效统计");
@@ -820,7 +833,11 @@ impl App {
                         ui.label(format!("{} · σ {:.3}° · 双频 {} 星", h.kind, h.std, h.dual));
                         ui.label(format!("基线 {:.4} m    俯仰 {:.2}°", h.baseline, h.pitch));
                         ui.colored_label(
-                            if hv { GREEN } else { MUTED },
+                            if hv {
+                                Palette::for_ui(ui).valid
+                            } else {
+                                Palette::for_ui(ui).muted
+                            },
                             if hv {
                                 "航向有效"
                             } else {
@@ -840,8 +857,8 @@ impl App {
                         RichText::new(
                             "有效俯仰（绿）/ 无效俯仰（红）· 北斗时间（UTC），最近 60 秒",
                         )
-                        .size(11.0)
-                        .color(MUTED),
+                        .size(12.0)
+                        .color(Palette::for_ui(ui).muted),
                     );
                     let pitches = self
                         .model
@@ -860,7 +877,7 @@ impl App {
                 .show(ui, |ui| {
                     for (label, index) in [("时间有效", 0), ("定位有效", 1), ("航向有效", 2)]
                     {
-                        ui.label(RichText::new(label).color(MUTED));
+                        ui.label(RichText::new(label).color(Palette::for_ui(ui).muted));
                         ui.label(
                             self.model
                                 .acquisition_delay(index)
@@ -892,18 +909,18 @@ impl App {
                         ("位置标准差 纬/经/高", format!("{:.3} / {:.3} / {:.3} m", p.std[0], p.std[1], p.std[2])),
                         ("地面航迹 / 垂向速度", format!("{:.2}° / {:.3} m/s", p.course, p.up)),
                     ] {
-                        ui.label(RichText::new(k).color(MUTED));
+                        ui.label(RichText::new(k).color(Palette::for_ui(ui).muted));
                         ui.label(v);
                         ui.end_row();
                     }
                 });
             }
-            cols[1].label(RichText::new("接收机时间").color(MUTED));
+            cols[1].label(RichText::new("接收机时间").color(Palette::for_ui(&cols[1]).muted));
             if let Some((Some(t), last)) = &self.model.time {
                 cols[1].label(format!("UTC  {}", t.format("%Y-%m-%d %H:%M:%S%.3f")));
                 cols[1].label(format!("北京 {}", (*t + chrono::Duration::hours(8)).format("%Y-%m-%d %H:%M:%S%.3f")));
                 cols[1].colored_label(
-                    if self.clock - last <= 2.0 { GREEN } else { Color32::YELLOW },
+                    if self.clock - last <= 2.0 { Palette::for_ui(&cols[1]).valid } else { Palette::for_ui(&cols[1]).warning },
                     if self.clock - last <= 2.0 { "时间有效" } else { "时间超时" },
                 );
             } else {
@@ -911,8 +928,8 @@ impl App {
             }
             cols[1].label(
                 RichText::new("有效航向使用环形 EMA（α=0.3）；无效航向仍绘制当前原始角度并灰显。\n定位和定向独立判定。")
-                    .size(11.0)
-                    .color(MUTED),
+                    .size(12.0)
+                    .color(Palette::for_ui(&cols[1]).muted),
             );
         });
     }
@@ -947,7 +964,7 @@ impl eframe::App for App {
             });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(&self.notice).color(MUTED));
+                ui.label(RichText::new(&self.notice).color(Palette::for_ui(ui).muted));
                 ui.separator();
                 let s = &self.decoder.stats;
                 ui.label(format!(
@@ -1043,7 +1060,7 @@ impl eframe::App for App {
                                 if line.contains(&self.filter) {
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(line).monospace().size(12.0).color(MUTED),
+                                            RichText::new(line).monospace().size(13.0).color(Palette::for_ui(ui).muted),
                                         )
                                         .wrap_mode(egui::TextWrapMode::Extend),
                                     );
@@ -1058,12 +1075,16 @@ impl eframe::App for App {
 fn metric(ui: &mut egui::Ui, title: &str, value: &str, valid: bool) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_min_width((ui.available_width() - 12.0).max(0.0));
-        ui.label(RichText::new(title).size(11.0).color(MUTED));
         ui.label(
-            RichText::new(value)
-                .size(23.0)
-                .color(if valid { CYAN } else { MUTED }),
+            RichText::new(title)
+                .size(12.0)
+                .color(Palette::for_ui(ui).muted),
         );
+        ui.label(RichText::new(value).size(23.0).color(if valid {
+            Palette::for_ui(ui).accent
+        } else {
+            Palette::for_ui(ui).muted
+        }));
         ui.label(
             RichText::new(if valid {
                 "● 有效"
@@ -1071,7 +1092,11 @@ fn metric(ui: &mut egui::Ui, title: &str, value: &str, valid: bool) {
                 "○ 无效 / 超时"
             })
             .size(11.0)
-            .color(if valid { GREEN } else { MUTED }),
+            .color(if valid {
+                Palette::for_ui(ui).valid
+            } else {
+                Palette::for_ui(ui).muted
+            }),
         );
     });
 }
@@ -1080,7 +1105,8 @@ fn compass(ui: &mut egui::Ui, angle: Option<f64>, valid: bool) {
     let painter = ui.painter();
     let center = rect.center();
     let radius = 79.0;
-    painter.circle_stroke(center, radius, Stroke::new(1.5_f32, MUTED));
+    let colors = Palette::for_ui(ui);
+    painter.circle_stroke(center, radius, Stroke::new(2.0_f32, colors.muted));
     for (label, dx, dy) in [
         ("N", 0.0, -1.0),
         ("E", 1.0, 0.0),
@@ -1091,8 +1117,8 @@ fn compass(ui: &mut egui::Ui, angle: Option<f64>, valid: bool) {
             center + Vec2::new(dx, dy) * (radius + 15.0),
             egui::Align2::CENTER_CENTER,
             label,
-            FontId::proportional(14.0),
-            MUTED,
+            FontId::proportional(16.0),
+            colors.text,
         );
     }
     for i in 0..36 {
@@ -1100,7 +1126,7 @@ fn compass(ui: &mut egui::Ui, angle: Option<f64>, valid: bool) {
         let dir = Vec2::new(a.sin(), -a.cos());
         painter.line_segment(
             [center + dir * (radius - 5.0), center + dir * radius],
-            Stroke::new(1.0_f32, MUTED),
+            Stroke::new(1.5_f32, colors.muted),
         );
     }
     if let Some(angle) = angle {
@@ -1109,15 +1135,16 @@ fn compass(ui: &mut egui::Ui, angle: Option<f64>, valid: bool) {
         painter.arrow(
             center - dir * 20.0,
             dir * 85.0,
-            Stroke::new(4.0_f32, if valid { CYAN } else { MUTED }),
+            Stroke::new(4.0_f32, if valid { colors.accent } else { colors.muted }),
         );
     }
-    painter.circle_filled(center, 4.0, Color32::WHITE);
+    painter.circle_filled(center, 4.0, colors.text);
 }
 fn pitch_ruler(ui: &mut egui::Ui, pitch: Option<f64>, valid: bool) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 150.0), Sense::hover());
     let painter = ui.painter();
-    let color = if valid { CYAN } else { MUTED };
+    let colors = Palette::for_ui(ui);
+    let color = if valid { colors.accent } else { colors.muted };
     if let Some(pitch) = pitch {
         painter.text(
             Pos2::new(rect.center().x, rect.top() + 18.0),
@@ -1132,7 +1159,7 @@ fn pitch_ruler(ui: &mut egui::Ui, pitch: Option<f64>, valid: bool) {
             egui::Align2::CENTER_CENTER,
             "--",
             FontId::proportional(24.0),
-            MUTED,
+            colors.muted,
         );
     }
 
@@ -1141,7 +1168,7 @@ fn pitch_ruler(ui: &mut egui::Ui, pitch: Option<f64>, valid: bool) {
     let y = rect.top() + 82.0;
     painter.line_segment(
         [Pos2::new(left, y), Pos2::new(right, y)],
-        Stroke::new(1.5_f32, MUTED),
+        Stroke::new(2.0_f32, colors.muted),
     );
     for degree in (-90..=90).step_by(10) {
         let x = egui::remap(degree as f32, -90.0..=90.0, left..=right);
@@ -1149,15 +1176,15 @@ fn pitch_ruler(ui: &mut egui::Ui, pitch: Option<f64>, valid: bool) {
         let tick_end = y + if major { 17.0 } else { 9.0 };
         painter.line_segment(
             [Pos2::new(x, y), Pos2::new(x, tick_end)],
-            Stroke::new(1.0_f32, MUTED),
+            Stroke::new(1.5_f32, colors.muted),
         );
         if major {
             painter.text(
                 Pos2::new(x, tick_end + 11.0),
                 egui::Align2::CENTER_CENTER,
                 format!("{degree}°"),
-                FontId::monospace(10.0),
-                MUTED,
+                FontId::monospace(12.0),
+                colors.text,
             );
         }
     }
@@ -1179,15 +1206,16 @@ fn pitch_chart(
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, 4.0, Color32::from_rgb(12, 19, 30));
+    let colors = Palette::for_ui(ui);
+    painter.rect_filled(rect, 4.0, colors.chart);
     let area = rect.shrink2(Vec2::new(40.0, 24.0));
     let Some(now) = now else {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             "等待北斗时间有效",
-            FontId::proportional(14.0),
-            MUTED,
+            FontId::proportional(16.0),
+            colors.muted,
         );
         return;
     };
@@ -1204,7 +1232,7 @@ fn pitch_chart(
         let fraction = i as f32 / 4.0;
         let x = area.left() + area.width() * fraction;
         let y = area.bottom() - area.height() * fraction;
-        let grid = Stroke::new(1.0_f32, Color32::from_rgb(35, 48, 65));
+        let grid = Stroke::new(1.0_f32, colors.grid);
         painter.line_segment(
             [Pos2::new(x, area.top()), Pos2::new(x, area.bottom())],
             grid,
@@ -1217,15 +1245,15 @@ fn pitch_chart(
             Pos2::new(x, area.bottom() + 5.0),
             egui::Align2::CENTER_TOP,
             format_gnss_axis(x_min + (x_max - x_min) * fraction as f64),
-            FontId::monospace(10.0),
-            MUTED,
+            FontId::monospace(12.0),
+            colors.text,
         );
         painter.text(
             Pos2::new(area.left() - 4.0, y),
             egui::Align2::RIGHT_CENTER,
             format!("{:.0}", -90.0 + 180.0 * fraction as f64),
-            FontId::monospace(10.0),
-            MUTED,
+            FontId::monospace(12.0),
+            colors.text,
         );
     }
 
@@ -1233,9 +1261,9 @@ fn pitch_chart(
     let mut visible_points = points.clone().filter(visible);
     if let Some(mut previous) = visible_points.next() {
         let color = if previous[2] > 0.5 {
-            GREEN
+            colors.valid
         } else {
-            Color32::RED
+            colors.invalid
         };
         painter.circle_filled(project([previous[0], previous[1]]), 2.5, color);
         for point in visible_points {
@@ -1244,12 +1272,23 @@ fn pitch_chart(
                     project([previous[0], previous[1]]),
                     project([point[0], point[1]]),
                 ],
-                Stroke::new(1.5_f32, if point[2] > 0.5 { GREEN } else { Color32::RED }),
+                Stroke::new(
+                    3.0_f32,
+                    if point[2] > 0.5 {
+                        colors.valid
+                    } else {
+                        colors.invalid
+                    },
+                ),
             );
             painter.circle_filled(
                 project([point[0], point[1]]),
-                2.5,
-                if point[2] > 0.5 { GREEN } else { Color32::RED },
+                3.5,
+                if point[2] > 0.5 {
+                    colors.valid
+                } else {
+                    colors.invalid
+                },
             );
             previous = point;
         }
@@ -1258,8 +1297,8 @@ fn pitch_chart(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             "等待俯仰数据",
-            FontId::proportional(14.0),
-            MUTED,
+            FontId::proportional(16.0),
+            colors.muted,
         );
     }
     if let Some(mouse) = response.hover_pos()
@@ -1271,8 +1310,8 @@ fn pitch_chart(
             mouse + Vec2::new(8.0, -8.0),
             egui::Align2::LEFT_BOTTOM,
             format_gnss_axis(hovered_time),
-            FontId::monospace(10.0),
-            Color32::WHITE,
+            FontId::monospace(12.0),
+            colors.text,
         );
     }
 }
@@ -1286,15 +1325,16 @@ fn chart(
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, 4.0, Color32::from_rgb(12, 19, 30));
+    let colors = Palette::for_ui(ui);
+    p.rect_filled(rect, 4.0, colors.chart);
     let area = rect.shrink2(Vec2::new(40.0, 24.0));
     let Some(now) = now else {
         p.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             "等待北斗时间有效",
-            FontId::proportional(14.0),
-            MUTED,
+            FontId::proportional(16.0),
+            colors.muted,
         );
         return;
     };
@@ -1337,7 +1377,7 @@ fn chart(
         let f = i as f32 / 4.0;
         let x = area.left() + area.width() * f;
         let y = area.bottom() - area.height() * f;
-        let grid = Stroke::new(1.0_f32, Color32::from_rgb(35, 48, 65));
+        let grid = Stroke::new(1.0_f32, colors.grid);
         p.line_segment(
             [Pos2::new(x, area.top()), Pos2::new(x, area.bottom())],
             grid,
@@ -1350,15 +1390,15 @@ fn chart(
             Pos2::new(x, area.bottom() + 5.0),
             egui::Align2::CENTER_TOP,
             format_gnss_axis(x_min + x_span * f as f64),
-            FontId::monospace(10.0),
-            MUTED,
+            FontId::monospace(12.0),
+            colors.text,
         );
         p.text(
             Pos2::new(area.left() - 4.0, y),
             egui::Align2::RIGHT_CENTER,
             format!("{:.2}", min[1] + (max[1] - min[1]) * f as f64),
-            FontId::monospace(10.0),
-            MUTED,
+            FontId::monospace(12.0),
+            colors.text,
         );
     }
     let mut visible_points = points.clone().filter(visible);
@@ -1367,9 +1407,9 @@ fn chart(
             project([previous[0], previous[1]]),
             3.5,
             if previous[2] > 0.5 {
-                GREEN
+                colors.valid
             } else {
-                Color32::RED
+                colors.invalid
             },
         );
         for point in visible_points {
@@ -1378,12 +1418,23 @@ fn chart(
                     project([previous[0], previous[1]]),
                     project([point[0], point[1]]),
                 ],
-                Stroke::new(1.5_f32, if point[2] > 0.5 { GREEN } else { Color32::RED }),
+                Stroke::new(
+                    3.0_f32,
+                    if point[2] > 0.5 {
+                        colors.valid
+                    } else {
+                        colors.invalid
+                    },
+                ),
             );
             p.circle_filled(
                 project([point[0], point[1]]),
                 3.5,
-                if point[2] > 0.5 { GREEN } else { Color32::RED },
+                if point[2] > 0.5 {
+                    colors.valid
+                } else {
+                    colors.invalid
+                },
             );
             previous = point;
         }
@@ -1392,8 +1443,8 @@ fn chart(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             "等待曲线数据",
-            FontId::proportional(14.0),
-            MUTED,
+            FontId::proportional(16.0),
+            colors.muted,
         );
     }
     if let Some(mouse) = response.hover_pos()
@@ -1406,7 +1457,7 @@ fn chart(
         p.circle_stroke(
             project([v[0], v[1]]),
             5.0,
-            Stroke::new(1.0_f32, Color32::WHITE),
+            Stroke::new(2.0_f32, colors.text),
         );
         response.on_hover_text(format!(
             "时间: {}\n数值: {:.4}",
