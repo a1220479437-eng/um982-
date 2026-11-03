@@ -70,6 +70,7 @@ fn main() -> eframe::Result {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1320.0, 900.0])
                 .with_min_inner_size([1000.0, 700.0]),
+            centered: true,
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
