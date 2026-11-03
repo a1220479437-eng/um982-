@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod command_sequence;
 #[cfg(test)]
 mod memory_tests;
 mod model;
@@ -15,6 +16,7 @@ use eframe::egui::{self, FontId, Pos2, RichText, Sense, Stroke, Vec2};
 use model::Model;
 use protocol::{Decoder, Record};
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
@@ -80,6 +82,38 @@ fn main() -> eframe::Result {
     )
 }
 
+#[derive(Default)]
+struct SendHistory {
+    entries: VecDeque<SentMessage>,
+}
+
+struct SentMessage {
+    time: String,
+    command: String,
+    success: Option<bool>,
+}
+
+impl SendHistory {
+    fn push(&mut self, command: String) {
+        if self.entries.len() == 5 {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(SentMessage {
+            time: chrono::Local::now().format("%H:%M:%S").to_string(),
+            command,
+            success: None,
+        });
+    }
+
+    fn complete(&mut self, success: bool) {
+        if let Some(entry) = self.entries.back_mut()
+            && entry.success.is_none()
+        {
+            entry.success = Some(success);
+        }
+    }
+}
+
 struct App {
     model: Model,
     statistics: statistics::Statistics,
@@ -98,6 +132,9 @@ struct App {
     port: String,
     baud: u32,
     command: String,
+    command_sequence: command_sequence::Sequence,
+    configuration_alert: Option<String>,
+    send_history: SendHistory,
     files: Vec<PathBuf>,
     selected: Option<PathBuf>,
     source: String,
@@ -166,6 +203,9 @@ impl App {
             port: "COM13".into(),
             baud: 115200,
             command: "BESTNAVA 0.2".into(),
+            command_sequence: command_sequence::Sequence::default(),
+            configuration_alert: None,
+            send_history: SendHistory::default(),
             files,
             selected: None,
             source: "等待串口输入".into(),
@@ -256,6 +296,7 @@ impl App {
             }
             Ok((path, Ok(loaded))) => {
                 self.connection = None;
+                self.command_sequence = command_sequence::Sequence::default();
                 self.reset();
                 self.decoder.stats = loaded.stats;
                 self.records = loaded.records;
@@ -303,6 +344,13 @@ impl App {
                     .and_then(|c| c.events.try_recv().ok());
                 match event {
                     Some(serial::Event::Bytes(bytes)) => {
+                        if self.command_sequence.active() {
+                            self.command_sequence.feed(&bytes);
+                            if let Some(success) = self.command_sequence.take_command_result() {
+                                self.send_history.complete(success);
+                            }
+                            self.notice = self.command_sequence.status();
+                        }
                         for r in self.decoder.feed(&bytes) {
                             self.model.apply(&r, self.clock);
                             self.statistics.apply(&r, self.clock);
@@ -338,6 +386,8 @@ impl App {
             if let Some(e) = error {
                 self.disconnect();
                 self.notice = format!("串口断开：{e}");
+            } else {
+                self.send_next_command();
             }
         } else if self.playing {
             self.clock =
@@ -352,7 +402,49 @@ impl App {
             }
         }
     }
+    fn send_next_command(&mut self) {
+        if let Some(command) = self.command_sequence.next(Instant::now()) {
+            self.send_history.push(command.into());
+            let result = self.connection.as_ref().map(|connection| {
+                connection
+                    .commands
+                    .send(serial::Command::Send(command.into()))
+            });
+            if matches!(result, Some(Ok(()))) {
+                self.notice = self.command_sequence.status();
+            } else {
+                self.show_configuration_result(false);
+                self.command_sequence = command_sequence::Sequence::default();
+            }
+        }
+        if let Some(success) = self.command_sequence.take_command_result() {
+            self.send_history.complete(success);
+        }
+        if let Some(success) = self.command_sequence.take_result() {
+            self.show_configuration_result(success);
+        }
+    }
+
+    fn show_configuration_result(&mut self, success: bool) {
+        if !success {
+            self.send_history.complete(false);
+        }
+        let message = if success && self.command_sequence.is_manual() {
+            "指令发送成功"
+        } else if success {
+            "本次配置成功，配置已保存至北斗"
+        } else {
+            "当前指令回复超时，本次配置失败\n失败原因：北斗未在线或线路不通."
+        };
+        self.notice = message.into();
+        self.configuration_alert = Some(message.into());
+    }
+
     fn disconnect(&mut self) {
+        if self.command_sequence.active() {
+            self.show_configuration_result(false);
+        }
+        self.command_sequence = command_sequence::Sequence::default();
         self.connection = None;
         self.files = replay_files(std::path::Path::new(REPLAY_DIR));
         self.decoder.finish();
@@ -492,24 +584,69 @@ impl App {
             };
         }
         ui.add_space(10.0);
-        ui.label("手动指令（自动添加 CRLF）");
+        ui.label("手动指令");
         ui.add(egui::TextEdit::singleline(&mut self.command).desired_width(210.0));
         if ui
-            .add_enabled(self.connection.is_some(), egui::Button::new("发送指令"))
+            .add_enabled(
+                self.connection.is_some() && !self.command_sequence.active(),
+                egui::Button::new("发送指令"),
+            )
             .clicked()
         {
             if !self.command.contains(['\r', '\n']) && !self.command.trim().is_empty() {
-                if let Some(c) = &self.connection {
-                    self.notice = match c.commands.send(serial::Command::Send(self.command.clone()))
-                    {
-                        Ok(()) => format!("已发送：{}", self.command),
-                        Err(e) => format!("发送失败：{e}"),
-                    };
-                }
+                self.command_sequence.start_manual(&self.command);
+                self.send_next_command();
             } else {
                 self.notice = "指令不能为空或包含换行".into();
             }
         }
+        if ui
+            .add_enabled(
+                self.connection.is_some() && !self.command_sequence.active(),
+                egui::Button::new("一键下发"),
+            )
+            .clicked()
+        {
+            self.command_sequence.start();
+            self.send_next_command();
+        }
+        ui.add_space(6.0);
+        ui.label("最近发送");
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_min_width(210.0);
+            if self.send_history.entries.is_empty() {
+                ui.label(RichText::new("暂无发送记录").color(Palette::for_ui(ui).muted));
+            }
+            for entry in &self.send_history.entries {
+                let (status, color) = match entry.success {
+                    Some(true) => ("成功", egui::Color32::from_rgb(40, 180, 90)),
+                    Some(false) => ("失败", egui::Color32::from_rgb(230, 65, 65)),
+                    None => ("等待中", Palette::for_ui(ui).muted),
+                };
+                ui.horizontal_top(|ui| {
+                    let status_width = 40.0;
+                    let message_width =
+                        (ui.available_width() - status_width - ui.spacing().item_spacing.x)
+                            .max(0.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(message_width, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(format!("[{}] {}", entry.time, entry.command))
+                                        .size(12.0),
+                                )
+                                .wrap(),
+                            );
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        ui.label(RichText::new(status).size(12.0).color(color));
+                    });
+                });
+            }
+        });
         ui.add_space(10.0);
         ui.separator();
         if ui
@@ -1020,6 +1157,39 @@ fn chart_value(value: Option<f64>, precision: usize) -> String {
 }
 
 #[cfg(test)]
+mod send_history_tests {
+    use super::SendHistory;
+
+    #[test]
+    fn retains_only_five_latest_commands_and_their_results() {
+        let mut history = SendHistory::default();
+        for index in 0..8 {
+            history.push(format!("CMD{index}"));
+            history.complete(index % 2 == 0);
+        }
+        assert_eq!(history.entries.len(), 5);
+        assert_eq!(history.entries.front().unwrap().command, "CMD3");
+        assert_eq!(history.entries.back().unwrap().command, "CMD7");
+        assert_eq!(history.entries.back().unwrap().success, Some(false));
+    }
+
+    #[test]
+    fn result_updates_pending_entry_only() {
+        let mut history = SendHistory::default();
+        history.complete(false);
+        history.push("UNLOG".into());
+        assert_eq!(history.entries.back().unwrap().success, None);
+        history.complete(true);
+        history.complete(false);
+        assert_eq!(history.entries.back().unwrap().success, Some(true));
+        history.push("SAVECONFIG".into());
+        history.complete(false);
+        assert_eq!(history.entries.front().unwrap().success, Some(true));
+        assert_eq!(history.entries.back().unwrap().success, Some(false));
+    }
+}
+
+#[cfg(test)]
 mod chart_value_tests {
     use super::chart_value;
 
@@ -1058,6 +1228,15 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.finish_load();
         self.tick();
+        if let Some(message) = self.configuration_alert.clone() {
+            egui::Modal::new(egui::Id::new("configuration_alert")).show(ctx, |ui| {
+                ui.heading("配置结果");
+                ui.label(message);
+                if ui.button("确定").clicked() {
+                    self.configuration_alert = None;
+                }
+            });
+        }
         ctx.request_repaint_after(Duration::from_millis(33));
         let dropped = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));
         if let Some(path) = dropped {
