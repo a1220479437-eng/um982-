@@ -38,13 +38,7 @@ fn archive_live(records: &mut Vec<Record>, bytes: &mut usize, record: Record) ->
 
 const CHART_WINDOW_SECONDS: f64 = 60.0;
 
-#[cfg(debug_assertions)]
-const REPLAY_TITLE: &str = "离线测试（仅开发验证）";
-#[cfg(not(debug_assertions))]
 const REPLAY_TITLE: &str = "数据回放";
-#[cfg(debug_assertions)]
-const REPLAY_DIR: &str = "data";
-#[cfg(not(debug_assertions))]
 const REPLAY_DIR: &str = "logs";
 
 fn replay_files(dir: &std::path::Path) -> Vec<PathBuf> {
