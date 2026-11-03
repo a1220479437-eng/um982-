@@ -1096,6 +1096,11 @@ impl eframe::App for App {
                 }
             });
             ui.separator();
+            if self.tab == 3 {
+                // Reserve space for both the page and nested table scrollbars;
+                // floating bars otherwise overlap at the right edge.
+                ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
+            }
             egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
                 0 => self.dashboard(ui),
                 1 => {
